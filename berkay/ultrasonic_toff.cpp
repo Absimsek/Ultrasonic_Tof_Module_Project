@@ -189,10 +189,30 @@ int main() {
         else distance = 100;
 
         // Generate noisy reading with spikes
-        double r = distance + gaussianNoise(0.0, GAUSS_STD);
+        // Main döngüsünün içindeki "Generate noisy reading" kısmını bununla değiştir:
 
-        if ((double)rand() / RAND_MAX < SPIKE_P)
-            r += SPIKE_VALUE;
+// Ses hızı (cm/mikrosaniye cinsinden, yakl. 343 m/s)
+        const double SPEED_OF_SOUND = 0.0343;
+
+        // 1. ADIM: FİZİK (Time-of-Flight Hesaplaması)
+        // Sensör gidiş-dönüş süresini ölçer (t = 2 * d / v)
+        double trueTimeMicroseconds = (distance * 2.0) / SPEED_OF_SOUND;
+
+        // 2. ADIM: GÜRÜLTÜYÜ ZAMANA EKLE (Noise Characterization)
+        // Gürültü aslında zamanlamada olur (jitter, yankı gecikmesi vb.)
+        double noisyTime = trueTimeMicroseconds + gaussianNoise(0.0, GAUSS_STD * 10.0); // Standart sapmayı zaman ölçeğine uydur
+
+        // Spike (Ani Sıçrama) Simülasyonu (Zaman hatası olarak)
+        if ((double)rand() / RAND_MAX < SPIKE_P) {
+            noisyTime += (SPIKE_VALUE * 2.0) / SPEED_OF_SOUND; // Mesafeyi zamana çevirip ekledik
+        }
+
+        // 3. ADIM: ÖLÇÜLEN MESAFEYE DÖNÜŞ (Simulated Sensor Reading)
+        // d = (t * v) / 2
+        double r = (noisyTime * SPEED_OF_SOUND) / 2.0;
+
+        // Negatif mesafe kontrolü (Fiziksel olarak imkansız)
+        if (r < 0) r = 0;
 
         // Store data
         actual[i] = distance;
