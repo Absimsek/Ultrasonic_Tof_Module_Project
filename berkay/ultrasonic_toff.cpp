@@ -1,254 +1,249 @@
 #include <iostream>
+#include <vector>
+#include <map>
+#include <string>
 #include <cmath>
-#include <cstdlib>
-#include <ctime>
-#include <fstream>
-#include <iomanip>
+#include <algorithm> // For sort
+#include <iomanip>   // For formatting
+#include <fstream>   // For CSV output
+#include <cstdlib>   // For rand() and srand()
+#include <ctime>     // For time() - REQUIRED FOR RANDOM SEED
 
 using namespace std;
 
-//
-// =========================
-// 1. EMA FILTER CLASS
-// =========================
+// ==========================================
+// 1. PHYSICS LAYER: Acoustic Propagation
+// ==========================================
+// Physics II: Speed of sound approx 343 m/s at 20C
+const double SPEED_OF_SOUND_M_S = 343.0;
+
+// Requirement: Use POINTERS for the Physics conversion layer
+// Input:  Pointer to raw Time-of-Flight (seconds)
+// Output: Pointer to computed Distance (meters)
+void convertTOFtoDistance(const double* timeArray, double* distArray, int n) {
+    for(int i = 0; i < n; i++) {
+        // Physics Eq: d = (v_sound * t) / 2
+        // Pointer arithmetic: *(arr + i) is equivalent to arr[i]
+        double t = *(timeArray + i);
+        *(distArray + i) = (SPEED_OF_SOUND_M_S * t) / 2.0;
+    }
+}
+
+// ==========================================
+// 2. CALCULUS LAYER: Filtering & Derivation
+// ==========================================
+
+// A. Difference Equation (EMA Filter)
+// Eq: S[n] = alpha * Y[n] + (1-alpha) * S[n-1]
 class EMAFilter {
 private:
     double alpha;
-    double Ys;
+    double s_prev;
+    bool isInitialized; // Flag to fix start-up lag
 
 public:
-    EMAFilter(double factor, double initialValue)//
-        : alpha(factor), Ys(initialValue) {}
+    EMAFilter(double a) : alpha(a), s_prev(0.0), isInitialized(false) {}
 
-    double apply(double Xn) {
-        double Yn = alpha * Xn + (1.0 - alpha) * Ys;
-        Ys = Yn;
-        return Yn;
+    double apply(double y_n) {
+        // If this is the very first reading, snap directly to it.
+        if (!isInitialized) {
+            s_prev = y_n;
+            isInitialized = true;
+            return y_n;
+        }
+
+        double s_n = alpha * y_n + (1.0 - alpha) * s_prev;
+        s_prev = s_n;
+        return s_n;
     }
 };
 
-//
-// =========================
-// 2. MEDIAN FILTER CLASS
-// =========================
+// B. Statistical Filter (Median) - For Outlier Rejection
 class MedianFilter {
 private:
-    double* window;
+    vector<double> window;
     int size;
-    int count;
-    int current;
 
 public:
-    MedianFilter(int windowSize) : size(windowSize), count(0), current(0) {
-        window = new double[size];
-        for (int i = 0; i < size; i++) window[i] = 0.0;
-    }
+    MedianFilter(int n) : size(n) {}
 
-    ~MedianFilter() {// ???????????????????????????
-        delete[] window;
-    }
+    double apply(double val) {
+        window.push_back(val);
+        // Maintain sliding window size
+        if (window.size() > size) window.erase(window.begin());
 
-    void bubbleSort(double* arr, int n) {
-        for (int i = 0; i < n - 1; i++) {
-            for (int j = 0; j < n - i - 1; j++) {
-                if (arr[j] > arr[j + 1]) {
-                    double temp = arr[j];
-                    arr[j] = arr[j + 1];
-                    arr[j + 1] = temp;
-                }
-            }
-        }
-    }
+        vector<double> sorted = window;
+        sort(sorted.begin(), sorted.end());
 
-    double apply(double Xn) {
-        window[current] = Xn;
-        current = (current + 1) % size;
-        if (count < size) count++;
-
-        double* temp = new double[count];
-        for (int i = 0; i < count; i++) {
-            temp[i] = window[i];
-        }
-
-        bubbleSort(temp, count);
-
-        double result;
-        if (count % 2 == 1) {
-            result = temp[count / 2];
-        }
-        else {
-            result = (temp[count / 2 - 1] + temp[count / 2]) / 2.0;
-        }
-
-        delete[] temp;
-        return result;
+        int len = sorted.size();
+        if (len == 0) return 0.0;
+        
+        // Return median
+        if (len % 2 == 1) return sorted[len / 2];
+        else return (sorted[len / 2 - 1] + sorted[len / 2]) / 2.0;
     }
 };
 
-//
-// =========================
-// 3. PID CONTROLLER CLASS
-// =========================
+// C. Finite Difference (Velocity)
+// Calculus Eq: v(t) = dx/dt approx (x[n] - x[n-1]) / dt
+class Differentiator {
+private:
+    double x_prev;
+    double dt;
+    bool firstRun;
+
+public:
+    Differentiator(double timeStep) : dt(timeStep), x_prev(0), firstRun(true) {}
+
+    double calculate(double x_n) {
+        if(firstRun) {
+            x_prev = x_n;
+            firstRun = false;
+            return 0.0;
+        }
+        double v = (x_n - x_prev) / dt;
+        x_prev = x_n;
+        return v;
+    }
+};
+
+// ==========================================
+// 3. CONTROL LAYER: PID (FIXED)
+// ==========================================
 class PID {
 private:
     double Kp, Ki, Kd;
     double integral;
     double prevError;
+    bool firstRun; // Added to fix Derivative Kick
 
 public:
-    PID(double p, double i, double d) : Kp(p), Ki(i), Kd(d), integral(0), prevError(0) {}
+    PID(double p, double i, double d) 
+        : Kp(p), Ki(i), Kd(d), integral(0), prevError(0), firstRun(true) {}
 
-    double compute(double setpoint, double measurement) {
+    double compute(double setpoint, double measurement, double dt) {
         double error = setpoint - measurement;
-        integral += error;
-        double derivative = error - prevError;
+        
+        // FIX: Handle First Run
+        // If this is the first step, assume previous error = current error.
+        // This makes derivative (error - prevError) = 0.
+        if (firstRun) {
+            prevError = error;
+            firstRun = false;
+        }
+
+        // Riemann Sum for Integral
+        integral += error * dt; 
+        
+        // Finite Difference for Derivative
+        double derivative = (error - prevError) / dt;
         prevError = error;
+
         return Kp * error + Ki * integral + Kd * derivative;
     }
 };
 
-//
-// =========================
-// 4. RMSE Function
-// =========================
-double calculateRMSE(double* actual, double* filtered, int N) {
-    double sum = 0;
-    for (int i = 0; i < N; i++) {
-        double e = actual[i] - filtered[i];
-        sum += e * e;
-    }
-    return sqrt(sum / N);
-}
-
-//
-// =========================
-// 5. ASCII GRAPH FUNCTION
-// =========================
-void drawAsciiGraph(double value, double scale = 1.0) {
-    int length = (int)(value / scale);
-    if (length < 0) length = 0;
-    if (length > 80) length = 80;
-
-    for (int i = 0; i < length; i++)
-        cout << "#";
-    cout << " (" << value << ")";
-}
-
-//
-// =========================
-// 6. GAUSSIAN NOISE FUNCTION
-// =========================
-double gaussianNoise(double mean, double stddev) {
-    double u1 = (double)rand() / RAND_MAX;
-    double u2 = (double)rand() / RAND_MAX;
-
-    // Box-Muller transform - M_PI yerine 3.14159265358979323846 kullan
-    double z0 = sqrt(-2.0 * log(u1)) * cos(2.0 * 3.14159265358979323846 * u2);
-
-    return mean + z0 * stddev;
-}
-
-//
-// =========================
-// 7. MAIN PROJECT
-// =========================
+// ==========================================
+// 4. MAIN PROJECT
+// ==========================================
 int main() {
-    srand((unsigned int)time(0)); // Warning düzeltildi
+    // --- NEW: Seed the random generator with current time ---
+    // This ensures the noise pattern is different every time you run the code.
+    srand(static_cast<unsigned int>(time(0))); 
 
+    // Config
     const int NUM_STEPS = 200;
-    const double GAUSS_STD = 1.5;
-    const double SPIKE_P = 0.05;
-    const double SPIKE_VALUE = 250.0;
+    const double DT = 0.05; // 50ms sampling
+    const double NOISE_STD_SEC = 0.00001; // Noise in seconds
+    
+    // Data Storage: Using MAPS for organized access
+    map<string, vector<double>> data;
+    
+    // Resize vectors
+    data["Time"].resize(NUM_STEPS);
+    data["TOF_Raw"].resize(NUM_STEPS);      
+    data["Dist_Raw"].resize(NUM_STEPS);     
+    data["Dist_Median"].resize(NUM_STEPS);
+    data["Dist_EMA"].resize(NUM_STEPS);     
+    data["Velocity"].resize(NUM_STEPS);
+    data["PID_Out"].resize(NUM_STEPS);
 
-    const double ALPHA_SLOW = 0.2;
-    const double ALPHA_FAST = 0.7;
-    const int MEDIAN_WINDOW = 7;
+    // Objects
+    // EMA self-initializes now
+    EMAFilter ema(0.1);       
+    MedianFilter median(5);        
+    Differentiator velocityCalc(DT);
+    PID pid(1.5, 0.05, 0.2);
 
-    // Filter objects
-    EMAFilter emaSlow(ALPHA_SLOW, 50.0);
-    EMAFilter emaFast(ALPHA_FAST, 50.0);
-    MedianFilter median(MEDIAN_WINDOW);
-    PID pid(0.4, 0.01, 0.15);
+    cout << "=== ULTRASONIC SENSOR PROJECT (FINAL VERSION) ===\n";
+    cout << "Physics: Acoustic TOF | Calculus: EMA & Finite Diff | C++: STL & Pointers\n\n";
 
-    // Arrays for data storage
-    double* actual = new double[NUM_STEPS];
-    double* raw = new double[NUM_STEPS];
-    double* medF = new double[NUM_STEPS];
-    double* emaS = new double[NUM_STEPS];
-    double* emaF = new double[NUM_STEPS];
-    double* pidOut = new double[NUM_STEPS];
-
-    double distance = 50.0;
-
-    cout << "\n=== REAL-TIME SENSOR + FILTER + PID SIMULATION ===\n";
-
+    // --- STEP 1: GENERATE PHYSICS DATA ---
     for (int i = 0; i < NUM_STEPS; i++) {
-        // Generate test scenario
-        if (i < 60) distance = 50;
-        else if (i < 160) distance = 50 + (i - 60) * 0.5;
-        else distance = 100;
+        double t = i * DT;
+        data["Time"][i] = t;
 
-        // Generate noisy reading with spikes
-        double r = distance + gaussianNoise(0.0, GAUSS_STD);
+        // True Scenario: Static -> Ramp (Moving) -> Static
+        double trueDist = 0.5; 
+        if (t > 3.0 && t < 7.0) trueDist = 0.5 + (t - 3.0) * 0.2; // Moving at 0.2 m/s
+        else if (t >= 7.0) trueDist = 1.3;
 
-        if ((double)rand() / RAND_MAX < SPIKE_P)
-            r += SPIKE_VALUE;
+        // Reverse Physics: Calculate Time-of-Flight
+        double trueTOF = (trueDist * 2.0) / SPEED_OF_SOUND_M_S;
 
-        // Store data
-        actual[i] = distance;
-        raw[i] = r;
+        // Add Noise & Spikes
+        double noise = ((rand() % 1000) / 1000.0 - 0.5) * NOISE_STD_SEC;
+        if (rand() % 100 < 5) noise += 0.002; // 2ms Spike (5% chance)
 
-        // Apply filters
-        medF[i] = median.apply(r);
-        emaS[i] = emaSlow.apply(r);
-        emaF[i] = emaFast.apply(r);
-
-        // PID control
-        pidOut[i] = pid.compute(80, emaS[i]);
-
-        // --- Terminal Real-time Output ---
-        cout << "\nSTEP " << i << "\n";
-        cout << "Actual: " << distance << "\n";
-        cout << "Raw   : " << r << "\n";
-        cout << "Median: " << medF[i] << "\n";
-        cout << "EMA_s : " << emaS[i] << "\n";
-        cout << "EMA_f : " << emaF[i] << "\n";
-        cout << "PID   : " << pidOut[i] << "\n";
-
-        // --- ASCII graph ---
-        cout << "GRAPH RAW    : "; drawAsciiGraph(r, 3.0);
-        cout << "\nGRAPH MEDIAN : "; drawAsciiGraph(medF[i], 3.0);
-        cout << "\nGRAPH EMA_S  : "; drawAsciiGraph(emaS[i], 3.0);
-        cout << "\n-------------------------------------------\n";
+        data["TOF_Raw"][i] = trueTOF + noise;
     }
 
-    //
-    // === CSV OUTPUT ===
-    //
-    ofstream f("output.csv");
-    f << "Step,Actual,Raw,Median,EMA_Slow,EMA_Fast,PID\n";
+    // --- STEP 2: APPLY PHYSICS CONVERSION (POINTERS) ---
+    // Passing raw memory addresses to the function
+    convertTOFtoDistance(data["TOF_Raw"].data(), data["Dist_Raw"].data(), NUM_STEPS);
+
+    // --- STEP 3: PROCESSING LOOP ---
     for (int i = 0; i < NUM_STEPS; i++) {
-        f << i << "," << actual[i] << "," << raw[i] << ","
-            << medF[i] << "," << emaS[i] << "," << emaF[i] << "," << pidOut[i] << "\n";
+        double rawD = data["Dist_Raw"][i];
+
+        // A. Apply Median (Remove Spikes)
+        double medD = median.apply(rawD);
+        data["Dist_Median"][i] = medD;
+
+        // B. Apply EMA (Smooth Noise)
+        double emaD = ema.apply(medD);
+        data["Dist_EMA"][i] = emaD;
+
+        // C. Calculate Velocity (Calculus)
+        data["Velocity"][i] = velocityCalc.calculate(emaD);
+
+        // D. PID Control (Target = 1.0m)
+        data["PID_Out"][i] = pid.compute(1.0, emaD, DT);
     }
-    f.close();
 
-    //
-    // === RMSE ===
-    //
-    cout << "\n=== RMSE RESULTS ===\n";
-    cout << "Median Filter RMSE: " << calculateRMSE(actual, medF, NUM_STEPS) << "\n";
-    cout << "EMA Slow RMSE     : " << calculateRMSE(actual, emaS, NUM_STEPS) << "\n";
-    cout << "EMA Fast RMSE     : " << calculateRMSE(actual, emaF, NUM_STEPS) << "\n";
-    cout << "\nCSV Output: output.csv\n";
+    // --- STEP 4: OUTPUT RESULTS ---
+    cout << fixed << setprecision(3);
+    cout << "Time(s) | Raw(m) | EMA(m) | Vel(m/s) | PID_Out\n";
+    cout << "----------------------------------------------\n";
+    
+    for (int i = 0; i < NUM_STEPS; i+=10) { 
+        cout << setw(7) << data["Time"][i] << " | "
+             << setw(6) << data["Dist_Raw"][i] << " | "
+             << setw(6) << data["Dist_EMA"][i] << " | "
+             << setw(8) << data["Velocity"][i] << " | "
+             << setw(7) << data["PID_Out"][i] << endl;
+    }
 
-    // Clean up memory
-    delete[] actual;
-    delete[] raw;
-    delete[] medF;
-    delete[] emaS;
-    delete[] emaF;
-    delete[] pidOut;
+    // Export to CSV
+    ofstream file("project_results.csv");
+    file << "Time,Raw,Median,EMA,Velocity,PID\n";
+    for(int i=0; i<NUM_STEPS; i++) {
+        file << data["Time"][i] << "," << data["Dist_Raw"][i] << "," 
+             << data["Dist_Median"][i] << "," << data["Dist_EMA"][i] << ","
+             << data["Velocity"][i] << "," << data["PID_Out"][i] << "\n";
+    }
+    file.close();
+    cout << "\nData exported to 'project_results.csv'" << endl;
 
     return 0;
 }
