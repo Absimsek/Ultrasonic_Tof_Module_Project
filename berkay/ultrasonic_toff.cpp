@@ -183,15 +183,10 @@ int main() {
         double t = i * DT;
         data["Time"][i] = t;
 
-        // Generate noisy reading with spikes
-        double r = distance + gaussianNoise(0.0, GAUSS_STD);
-
-        if ((double)rand() / RAND_MAX < SPIKE_P)
-            r += SPIKE_VALUE;
-
-        // Store data
-        actual[i] = distance;
-        raw[i] = r;
+        // True Scenario: Static -> Ramp (Moving) -> Static
+        double trueDist = 0.5; 
+        if (t > 3.0 && t < 7.0) trueDist = 0.5 + (t - 3.0) * 0.2; // Moving at 0.2 m/s
+        else if (t >= 7.0) trueDist = 1.3;
 
         // Reverse Physics: Calculate Time-of-Flight
         double trueTOF = (trueDist * 2.0) / SPEED_OF_SOUND_M_S;
