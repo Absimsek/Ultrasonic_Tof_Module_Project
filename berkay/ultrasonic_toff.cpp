@@ -1,205 +1,254 @@
 #include <iostream>
 #include <vector>
+#include <map>
+#include <string>
 #include <cmath>
-#include <cstdlib>
-#include <ctime>
-#include <fstream>
-#include <iomanip>
-#include <algorithm> // std::sort
+#include <algorithm> // For sort
+#include <iomanip>   // For formatting
+#include <fstream>   // For CSV output
+#include <cstdlib>   // For rand() and srand()
+#include <ctime>     // For time() - REQUIRED FOR RANDOM SEED
 
 using namespace std;
 
 // ==========================================
-// CALCULUS II: EMA (Difference Equation)
+// 1. PHYSICS LAYER: Acoustic Propagation
 // ==========================================
-// Teorik Temel: Birinci dereceden doğrusal fark denklemi (First-Order Linear Difference Equation)
-// Formül: y[n] = α * x[n] + (1 - α) * y[n-1]
+// Physics II: Speed of sound approx 343 m/s at 20C
+const double SPEED_OF_SOUND_M_S = 343.0;
+
+// Requirement: Use POINTERS for the Physics conversion layer
+// Input:  Pointer to raw Time-of-Flight (seconds)
+// Output: Pointer to computed Distance (meters)
+void convertTOFtoDistance(const double* timeArray, double* distArray, int n) {
+    for(int i = 0; i < n; i++) {
+        // Physics Eq: d = (v_sound * t) / 2
+        // Pointer arithmetic: *(arr + i) is equivalent to arr[i]
+        double t = *(timeArray + i);
+        *(distArray + i) = (SPEED_OF_SOUND_M_S * t) / 2.0;
+    }
+}
+
+// ==========================================
+// 2. CALCULUS LAYER: Filtering & Derivation
+// ==========================================
+
+// A. Difference Equation (EMA Filter)
+// Eq: S[n] = alpha * Y[n] + (1-alpha) * S[n-1]
 class EMAFilter {
 private:
     double alpha;
-    double y_prev; // y[n-1]
+    double s_prev;
+    bool isInitialized; // Flag to fix start-up lag
 
 public:
-    EMAFilter(double factor, double initialValue)
-        : alpha(factor), y_prev(initialValue) {}
+    EMAFilter(double a) : alpha(a), s_prev(0.0), isInitialized(false) {}
 
-    double apply(double x_n) {
-        // Fark denkleminin kodlanmış hali:
-        double y_n = alpha * x_n + (1.0 - alpha) * y_prev;
+    double apply(double y_n) {
+        // If this is the very first reading, snap directly to it.
+        if (!isInitialized) {
+            s_prev = y_n;
+            isInitialized = true;
+            return y_n;
+        }
 
-        y_prev = y_n; // Bir sonraki adım için hafızaya al
-        return y_n;
+        double s_n = alpha * y_n + (1.0 - alpha) * s_prev;
+        s_prev = s_n;
+        return s_n;
     }
 };
 
-// ==========================================
-// PROGRAMMING: Median Filter
-// ==========================================
-// Amaç: Veri setindeki aykırı değerleri (Outliers) temizlemek.
-// Yöntem: Sliding Window + Sorting
+// B. Statistical Filter (Median) - For Outlier Rejection
 class MedianFilter {
 private:
     vector<double> window;
     int size;
-    int currentIdx;
 
 public:
-    MedianFilter(int windowSize) : size(windowSize), currentIdx(0) {
-        window.resize(size, 0.0);
-    }
+    MedianFilter(int n) : size(n) {}
 
-    double apply(double x_n) {
-        // Dairesel buffer (Programming Skill)
-        window[currentIdx] = x_n;
-        currentIdx = (currentIdx + 1) % size;
+    double apply(double val) {
+        window.push_back(val);
+        // Maintain sliding window size
+        if (window.size() > size) window.erase(window.begin());
 
-        // Sıralama için kopya oluştur
-        vector<double> sortedWindow = window;
-        sort(sortedWindow.begin(), sortedWindow.end());
+        vector<double> sorted = window;
+        sort(sorted.begin(), sorted.end());
 
-        // Medyan bulma
-        if (size % 2 == 1) return sortedWindow[size / 2];
-        else return (sortedWindow[size / 2 - 1] + sortedWindow[size / 2]) / 2.0;
+        int len = sorted.size();
+        if (len == 0) return 0.0;
+        
+        // Return median
+        if (len % 2 == 1) return sorted[len / 2];
+        else return (sorted[len / 2 - 1] + sorted[len / 2]) / 2.0;
     }
 };
 
-// ==========================================
-// CALCULUS II: Finite Difference (Velocity)
-// ==========================================
-// Teorik Temel: Türev (Derivative)
-// v(t) = dx/dt ≈ (x[n] - x[n-1]) / Δt
+// C. Finite Difference (Velocity)
+// Calculus Eq: v(t) = dx/dt approx (x[n] - x[n-1]) / dt
 class Differentiator {
 private:
     double x_prev;
     double dt;
+    bool firstRun;
 
 public:
-    Differentiator(double timeStep, double initialValue)
-        : dt(timeStep), x_prev(initialValue) {}
+    Differentiator(double timeStep) : dt(timeStep), x_prev(0), firstRun(true) {}
 
-    double calculateVelocity(double x_n) {
-        // Sonlu farklar yöntemi ile hız hesabı
-        double velocity = (x_n - x_prev) / dt;
+    double calculate(double x_n) {
+        if(firstRun) {
+            x_prev = x_n;
+            firstRun = false;
+            return 0.0;
+        }
+        double v = (x_n - x_prev) / dt;
         x_prev = x_n;
-        return velocity;
+        return v;
     }
 };
 
 // ==========================================
-// PROGRAMMING: PID Controller
+// 3. CONTROL LAYER: PID (FIXED)
 // ==========================================
 class PID {
 private:
     double Kp, Ki, Kd;
     double integral;
     double prevError;
+    bool firstRun; // Added to fix Derivative Kick
 
 public:
-    PID(double p, double i, double d) : Kp(p), Ki(i), Kd(d), integral(0), prevError(0) {}
+    PID(double p, double i, double d) 
+        : Kp(p), Ki(i), Kd(d), integral(0), prevError(0), firstRun(true) {}
 
     double compute(double setpoint, double measurement, double dt) {
         double error = setpoint - measurement;
-        integral += error * dt; // Riemann Sum (İntegral yaklaşımı)
-        double derivative = (error - prevError) / dt; // Finite Difference (Türev yaklaşımı)
+        
+        // FIX: Handle First Run
+        // If this is the first step, assume previous error = current error.
+        // This makes derivative (error - prevError) = 0.
+        if (firstRun) {
+            prevError = error;
+            firstRun = false;
+        }
+
+        // Riemann Sum for Integral
+        integral += error * dt; 
+        
+        // Finite Difference for Derivative
+        double derivative = (error - prevError) / dt;
         prevError = error;
 
         return Kp * error + Ki * integral + Kd * derivative;
     }
 };
 
-// Yardımcı Fonksiyon: Gürültü Üretici
-double generateNoise(double stddev) {
-    double u1 = (double)rand() / RAND_MAX;
-    double u2 = (double)rand() / RAND_MAX;
-    if (u1 < 1e-10) u1 = 1e-10;
-    double z = sqrt(-2.0 * log(u1)) * cos(2.0 * 3.14159 * u2);
-    return z * stddev;
-}
-
 // ==========================================
-// MAIN PROGRAM
+// 4. MAIN PROJECT
 // ==========================================
 int main() {
-    srand(static_cast<unsigned int>(time(0)));
+    // --- NEW: Seed the random generator with current time ---
+    // This ensures the noise pattern is different every time you run the code.
+    srand(static_cast<unsigned int>(time(0))); 
 
-    // SİMÜLASYON PARAMETRELERİ
+    // Config
     const int NUM_STEPS = 200;
-    const double DT = 0.1; // Zaman adımı (saniye) -> Calculus için önemli
-    const double NOISE_STD = 2.0;
+    const double DT = 0.05; // 50ms sampling
+    const double NOISE_STD_SEC = 0.00001; // Noise in seconds
+    
+    // Data Storage: Using MAPS for organized access
+    map<string, vector<double>> data;
+    
+    // Resize vectors
+    data["Time"].resize(NUM_STEPS);
+    data["TOF_Raw"].resize(NUM_STEPS);      
+    data["Dist_Raw"].resize(NUM_STEPS);     
+    data["Dist_Median"].resize(NUM_STEPS);
+    data["Dist_EMA"].resize(NUM_STEPS);     
+    data["Velocity"].resize(NUM_STEPS);
+    data["PID_Out"].resize(NUM_STEPS);
 
-    // Nesneler (Programming)
-    EMAFilter ema(0.2, 0.0);
-    MedianFilter median(5);
-    Differentiator velocityCalc(DT, 0.0); // Hız hesaplayıcı
-    PID pid(0.5, 0.01, 0.1);
+    // Objects
+    // EMA self-initializes now
+    EMAFilter ema(0.1);       
+    MedianFilter median(5);        
+    Differentiator velocityCalc(DT);
+    PID pid(1.5, 0.05, 0.2);
 
-    // Veri Saklama (std::vector)
-    vector<double> timeStamps(NUM_STEPS);
-    vector<double> rawDist(NUM_STEPS);
-    vector<double> filteredDist(NUM_STEPS);
-    vector<double> velocity(NUM_STEPS);
-    vector<double> pidOutput(NUM_STEPS);
+    cout << "=== ULTRASONIC SENSOR PROJECT (FINAL VERSION) ===\n";
+    cout << "Physics: Acoustic TOF | Calculus: EMA & Finite Diff | C++: STL & Pointers\n\n";
 
-    cout << "=== CALCULUS II & PROGRAMMING PROJECT ===\n";
-    cout << "Focus: Difference Equations, Finite Differences, Algorithms\n\n";
-
-    double currentDist = 0.0;
-    double target = 50.0; // PID Hedefi
-
-    // --- SİMÜLASYON DÖNGÜSÜ ---
+    // --- STEP 1: GENERATE PHYSICS DATA ---
     for (int i = 0; i < NUM_STEPS; i++) {
         double t = i * DT;
-        timeStamps[i] = t;
+        data["Time"][i] = t;
 
-        // 1. Hareket Senaryosu (Matematiksel Fonksiyon)
-        // 0-10sn arası dur, sonra rampa yap (hız oluşsun), sonra dur.
-        if (t < 5.0) currentDist = 20.0;
-        else if (t < 15.0) currentDist = 20.0 + (t - 5.0) * 5.0; // Hız = 5 m/s
-        else currentDist = 70.0;
+        // Generate noisy reading with spikes
+        double r = distance + gaussianNoise(0.0, GAUSS_STD);
 
-        // 2. Gürültü Ekleme (Raw Data)
-        double noise = generateNoise(NOISE_STD);
-        // %10 ihtimalle büyük sapma (Spike) ekle - Median filtresini test etmek için
-        if ((double)rand() / RAND_MAX < 0.1) noise += 20.0;
+        if ((double)rand() / RAND_MAX < SPIKE_P)
+            r += SPIKE_VALUE;
 
-        double r = currentDist + noise;
-        rawDist[i] = r;
+        // Store data
+        actual[i] = distance;
+        raw[i] = r;
 
-        // 3. Filtreleme (EMA: Difference Equation Uygulaması)
-        // Önce Median ile spike temizle, sonra EMA ile yumuşat
-        double m = median.apply(r);
-        double f = ema.apply(m);
-        filteredDist[i] = f;
+        // Reverse Physics: Calculate Time-of-Flight
+        double trueTOF = (trueDist * 2.0) / SPEED_OF_SOUND_M_S;
 
-        // 4. CALCULUS: Hız Hesaplama (Finite Difference)
-        // d(mesafe) / dt = hız
-        // Not: Ham verinin türevini alırsak gürültü patlar. 
-        // Filtrelenmiş verinin türevini alıyoruz (Calculus uygulamasının başarısı).
-        velocity[i] = velocityCalc.calculateVelocity(f);
+        // Add Noise & Spikes
+        double noise = ((rand() % 1000) / 1000.0 - 0.5) * NOISE_STD_SEC;
+        if (rand() % 100 < 5) noise += 0.002; // 2ms Spike (5% chance)
 
-        // 5. PID Kontrol (Opsiyonel)
-        pidOutput[i] = pid.compute(target, f, DT);
-
-        // Terminal Çıktısı (Her 10 adımda bir özet)
-        if (i % 10 == 0) {
-            cout << "T=" << fixed << setprecision(1) << t << "s | ";
-            cout << "Raw: " << setprecision(2) << r << " | ";
-            cout << "Filt: " << f << " | ";
-            cout << "Vel: " << velocity[i] << " unit/s" << endl;
-        }
+        data["TOF_Raw"][i] = trueTOF + noise;
     }
 
-    // --- CSV ÇIKTISI (Excel/Python Analizi İçin) ---
-    ofstream file("calculus_project_data.csv");
-    file << "Time,RawDistance,FilteredDistance,CalculatedVelocity,PID_Out\n";
+    // --- STEP 2: APPLY PHYSICS CONVERSION (POINTERS) ---
+    // Passing raw memory addresses to the function
+    convertTOFtoDistance(data["TOF_Raw"].data(), data["Dist_Raw"].data(), NUM_STEPS);
+
+    // --- STEP 3: PROCESSING LOOP ---
     for (int i = 0; i < NUM_STEPS; i++) {
-        file << timeStamps[i] << ","
-            << rawDist[i] << ","
-            << filteredDist[i] << ","
-            << velocity[i] << ","
-            << pidOutput[i] << "\n";
+        double rawD = data["Dist_Raw"][i];
+
+        // A. Apply Median (Remove Spikes)
+        double medD = median.apply(rawD);
+        data["Dist_Median"][i] = medD;
+
+        // B. Apply EMA (Smooth Noise)
+        double emaD = ema.apply(medD);
+        data["Dist_EMA"][i] = emaD;
+
+        // C. Calculate Velocity (Calculus)
+        data["Velocity"][i] = velocityCalc.calculate(emaD);
+
+        // D. PID Control (Target = 1.0m)
+        data["PID_Out"][i] = pid.compute(1.0, emaD, DT);
+    }
+
+    // --- STEP 4: OUTPUT RESULTS ---
+    cout << fixed << setprecision(3);
+    cout << "Time(s) | Raw(m) | EMA(m) | Vel(m/s) | PID_Out\n";
+    cout << "----------------------------------------------\n";
+    
+    for (int i = 0; i < NUM_STEPS; i+=10) { 
+        cout << setw(7) << data["Time"][i] << " | "
+             << setw(6) << data["Dist_Raw"][i] << " | "
+             << setw(6) << data["Dist_EMA"][i] << " | "
+             << setw(8) << data["Velocity"][i] << " | "
+             << setw(7) << data["PID_Out"][i] << endl;
+    }
+
+    // Export to CSV
+    ofstream file("project_results.csv");
+    file << "Time,Raw,Median,EMA,Velocity,PID\n";
+    for(int i=0; i<NUM_STEPS; i++) {
+        file << data["Time"][i] << "," << data["Dist_Raw"][i] << "," 
+             << data["Dist_Median"][i] << "," << data["Dist_EMA"][i] << ","
+             << data["Velocity"][i] << "," << data["PID_Out"][i] << "\n";
     }
     file.close();
+    cout << "\nData exported to 'project_results.csv'" << endl;
 
     cout << "\nAnalysis saved to 'calculus_project_data.csv'.\n";
     return 0;
